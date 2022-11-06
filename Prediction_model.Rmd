@@ -1,6 +1,6 @@
 ---
 title: "<center> BIOS 624 Prediction Assignment</center>"
-author: "Dayo, Sallah,  Frezghi"
+author: "Sallah"
 date: "`r Sys.Date()`"
 output: 
   html_document:
