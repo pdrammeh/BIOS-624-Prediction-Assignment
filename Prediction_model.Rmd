@@ -1,0 +1,215 @@
+---
+title: "<center> BIOS 624 Prediction Assignment</center>"
+author: "Dayo, Sallah,  Frezghi"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: readable
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# readable
+```
+
+```{r,  message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(tidyverse)
+library(ggpubr)
+library(rms)
+library(tableone)
+library(sjPlot) # beautiful summaries
+library(pROC)
+library(ROCR)
+library(ROCit)
+library(imputeTS)
+library(mice)
+
+
+
+# personalized theme
+all_theme  <- theme_bw() + theme(panel.border = element_rect(color = "black", size = 1.2)) +
+  theme(axis.title = element_text(size = 15), plot.subtitle = element_text(size = 15),
+        axis.text = element_text(size = 14.5), axis.title.x =  element_text(size = 15),
+        axis.title.y =  element_text(size = 15),
+        legend.background = element_rect(size=0.2),
+        legend.text = element_text(size = 14)) + theme(legend.position = c(0.8, 0.2))
+```
+
+
+
+## Exploratory analysis
+
+
+```{r}
+data<-read_xlsx("COVID for Students.xlsx")
+newdata<-data %>% slice(c(1:429))
+data<-newdata
+data$DIED<-as.factor(data$DIED) #outcome
+data$wave<-as.factor(data$wave)
+data$male<-as.factor(data$male)
+data$admithosp<-as.Date(data$admithosp)
+data$INTUBDATE<-as.Date(data$INTUBDATE)
+data$intubeatAdmission<-ifelse(data$INTUBDATE==data$admithosp,1,0)
+data$intubeatAdmission[is.na(data$intubeatAdmission)]<-0
+data$intubeatAdmission<-as.factor(data$intubeatAdmission) #intubation or not at admission  
+##non factor variables to put into the full  model SOFA is The Sequential Organ Failure Assessment (SOFA), maxcr, Charson comobnility , bmi , oxygen level 
+#data$vaccine<-factor(data$vaccine,levels = c("0","1"), labels = c("0","1"))
+
+
+
+#table 1
+colnames(data)[14]<-"day1highox"
+colnames(data)[26]<-"CHARLSONCOMORBIDITY"
+data$CHARLSONCOMORBIDITY<-as.factor(data$CHARLSONCOMORBIDITY)
+subdata<-data %>% select(c(2,9,10,14,20,25,26,30,40,41,42))
+
+vars<-c("age","intubeatAdmission","wave","SOFA","crpmax","bmi","vaccine","male")
+table1<-CreateTableOne(vars = vars,strata = "DIED",data = subdata, test=TRUE)
+
+
+table<-print(table1,showAllLevels = TRUE)
+
+
+#write.csv(table,"table1.csv")
+
+#check corelation between intubation at day 1 and oxygen level 
+ggplot(data) + geom_boxplot(aes(x = factor(intubeatAdmission), y = day1highox)) 
+
+#We can see that these two variables are correlated. Higher oxygen levels are intubated at the first day. Hence, we will drop oxygen level from our model. 
+
+
+```
+
+
+
+# Modelling  for complete case analysis
+
+
+```{r}
+
+
+
+model<-glm(DIED~rcs(age)+intubeatAdmission+SOFA+crpmax+bmi+male,data=data,family = binomial)
+
+# exp(summary(model)$coef)
+# tab_model(model)
+# 
+# plot_model(model, vline.color = "gray") + theme_pubr()
+
+fit<-lrm(DIED~rcs(age)+intubeatAdmission+SOFA+crpmax+bmi+male, data=data,x=TRUE, y=TRUE)
+
+
+#calibration plot 
+call<-calibrate(fit, method="boot", B=100,estimates = TRUE)
+plot(call,xlab("Predicted Probabilities"))
+
+
+
+#ROC curve 
+datavariables<-c("DIED","age","intubeatAdmission","SOFA","crpmax","bmi","male")
+newdata<-newdata1<-data[,datavariables]
+newdata<-newdata1<-na.omit(newdata)
+p = predict(model, newdata=newdata, type="response",interval = "prediction")
+
+# If p exceeds threshold of 0.5, 1 else 0
+cDIED <- ifelse(p > 0.5, 1, 0)
+# Convert to factor: p_class
+p_class <- factor(cDIED, levels = levels(newdata1[["DIED"]]))
+# Create confusion matrix
+#confusionMatrix(p_class, newdata1[["motor"]])
+
+cat("Plot of ROC curve: \n")
+
+roc_pred <- prediction(predictions = p  , labels = newdata1$DIED)
+
+roc_perf1a<-roc_perf <- performance(roc_pred , "tpr" , "fpr")
+
+df=data.frame(predictions=p, labels=newdata1[["DIED"]])
+ROCit_obj_1a <- ROCit_obj <- rocit(score=df$predictions,class=df$labels)
+ciAUC(ROCit_obj)
+
+
+plot(ROCit_obj,YIndex = T, values = F, col = c(2,4))
+# 
+# t.data <- datadist(newdata)
+# options(datadist = 't.data')
+# plot(nomogram(fit, fun = function(x)plogis(x)), lwd=2)
+
+```
+
+
+#Impute the missing data and see
+```{r}
+data2<-read_xlsx("COVID for Students.xlsx")
+data2$intubeatAdmission<-ifelse(data2$INTUBDATE==data2$admithosp,1,0)
+data2$intubeatAdmission[is.na(data2$intubeatAdmission)]<-0
+data2$intubeatAdmission<-as.factor(data2$intubeatAdmission) #intubation 
+datavariables<-c("DIED","age","intubeatAdmission","SOFA","crpmax","bmi","male")
+
+subdata<-data2 %>% select(all_of(datavariables))
+subdata$DIED<-as.factor(subdata$DIED)
+library(simputation)
+
+subdata <- subdata %>%data.frame()%>%impute_cart(., DIED ~  intubeatAdmission + bmi + age+crpmax+male+SOFA) %>% impute_cart(.,crpmax~intubeatAdmission + bmi + age+male+SOFA+DIED) %>% impute_cart(.,bmi~intubeatAdmission + crpmax +age+crpmax+male+SOFA+DIED) %>% impute_cart(., SOFA ~  intubeatAdmission + bmi + age+crpmax+male+DIED)
+               
+
+
+datanew=subdata
+
+fit<-lrm(DIED~rcs(age)+intubeatAdmission+SOFA+crpmax+bmi+male, data=datanew,x=TRUE, y=TRUE)
+
+model<-glm(DIED~rcs(age)+intubeatAdmission+SOFA+crpmax+bmi+male,family = binomial,data = datanew)
+
+#Model estimates 
+exp(summary(model)$coef)
+tab_model(model)
+
+#calibration plot############################# 
+call<-calibrate(fit, method="boot", B=100,estimates = TRUE)
+plot(call,xlab("Predicted Probabilities"))
+
+
+#########################ROC curve################################## 
+
+p = predict(model, newdata=datanew, type="response",interval = "prediction")
+
+# If p exceeds threshold of 0.5, 1 else 0
+cDIED <- ifelse(p > 0.5, 1, 0)
+# Convert to factor: p_class
+p_class <- factor(cDIED, levels = levels(datanew[["DIED"]]))
+# Create confusion matrix
+caret::confusionMatrix(p_class, datanew[["DIED"]])
+
+cat("Plot of ROC curve: \n")
+
+roc_pred <- prediction(predictions = p  , labels = datanew$DIED)
+
+roc_perf1a<-roc_perf <- performance(roc_pred , "tpr" , "fpr")
+
+df=data.frame(predictions=p, labels=datanew[["DIED"]])
+ROCit_obj_1a <- ROCit_obj <- rocit(score=df$predictions,class=df$labels)
+ciAUC(ROCit_obj)
+
+plot(call,xlab("Predicted Probabilities"),subtitles=FALSE,                    
+      conf.int=TRUE,                              
+      cex.subtitles=.75,                  
+      riskdist=FALSE,                     
+      add=FALSE,
+      scat1d.opts=list(nhistSpike=1000), 
+      par.corrected=list(col="red",lty=4,lwd=4))
+plot(ROCit_obj,YIndex = T, values = F, col = c(2,4))
+
+
+vars<-c("age","intubeatAdmission","wave","SOFA","crpmax","bmi","vaccine","male")
+table1<-CreateTableOne(vars = vars,strata = "DIED",data = datanew, test=TRUE)
+
+
+table<-print(table1,showAllLevels = TRUE)
+
+#verify model assumptions
+performance::check_model(model)
+```
